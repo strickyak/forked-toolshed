@@ -16,6 +16,7 @@ void test_os9_format()
 	// test format of a non-existent disk image
 	unsigned int totalSectors, totalBytes;
 	int clusterSize = 0;
+
 	ec = _os9_format("test.dsk", 0, 35, 18, 18, 1, 256, &clusterSize, "Test Disk", 8, 8,
 			 1, 1, 0, 0, &totalSectors, &totalBytes);
 	ASSERT_EQUALS(0, ec);
@@ -26,6 +27,44 @@ void test_os9_format()
 			 "Test Disk with filename that is way too long for the field",
 			 8, 8, 1, 1, 0, 0, &totalSectors, &totalBytes);
 	ASSERT_EQUALS(0, ec);
+
+
+	// Test format of a hard drive with 65000 sectors.
+	// Getting the parameters for _os9_format:
+	//   $ gdb os9/os9
+	//   (gdb) b _os9_format
+	//   (gdb) run format test.dsk -l65000
+	// Breakpoint 1, _os9_format (pathname=0x7fffffffe0ad "test.dsk", os968k=0,
+	// tracks=125, sectorsPerTrack=4, sectorsTrack0=4, heads=130, sectorSize=256,
+	// clusterSize=0x7fffffffdae8, diskName=0x5555555761df "CoCo Disk",
+	// sectorAllocationSize=8, tpi=0, density=0, formatEntire=0, isDragon=0, isHDD=1,
+	// totalSectors=0x7fffffffdaec, totalBytes=0x7fffffffdaf0) at ../../../librbf/librbfformat.c:25
+	//   (gdb) cont
+	// Continuing.
+	// Format Summary
+	// --------------
+	// Geometry Data:
+	//       Cylinders: 125
+	//           Heads: 130
+	//   Sectors/track: 4
+	//     Sector size: 256
+	//
+	// Logical Data:
+	//   Total sectors: 65000
+	//   Size in bytes: 16640000
+	//    Cluster size: 1
+
+    // See test_os9_command_format for a test of the command line
+    // that generates this scenario.
+
+	ec = _os9_format("test.dsk", /*68k=*/0,
+			/*tracks=*/125, /*sPT=*/4, /*sT0=*/4, /*heads=*/130, /*sSize=*/256, &clusterSize,
+			 "HD-Test",
+			 /*sas=*/8, /*tpi=*/0, /*density=*/0, /*fE=*/1, /*isD=*/0, /*isHDD=*/1,
+			 &totalSectors, &totalBytes);
+	ASSERT_EQUALS(0, ec);
+	ASSERT_EQUALS(65000, totalSectors);
+	ASSERT_EQUALS(65000 * 256, totalBytes);
 
 	// TODO: test format with oddball parameters to make sure it can survive
 }
