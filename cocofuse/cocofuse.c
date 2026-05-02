@@ -26,9 +26,10 @@
 
 #ifdef __APPLE__
 #include <unistd.h>
-#endif
-
+#include <fuse_t/fuse.h>
+#else
 #include <fuse.h>
+#endif
 
 static int coco_access(const char *path, int mode);
 static int coco_statfs(const char *path, struct statvfs *stbuf);
@@ -343,8 +344,8 @@ static int coco_rename(const char *path, const char *newname)
 	 *    - If so just rename.
 	 *    - If not, rename then delete orginal.
 	 */
-	p1 = strrchr(path, '/');
-	p2 = strrchr(newname, '/');
+	p1 = strrchr((char *)path, '/');
+	p2 = strrchr((char *)newname, '/');
 
 	if (p1 == NULL || p2 == NULL)
 	{

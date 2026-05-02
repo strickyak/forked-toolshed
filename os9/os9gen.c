@@ -137,7 +137,20 @@ int os9gen(int argc, char *argv[])
 	return (ec);
 }
 
+/*
+ * OS-9/6809 bootstraps (and some OS-9/68000 bootstraps) require OS9Boot to be
+ * contiguous so it can be loaded as a single linear stream from the start LSN.
+ * Later OS-9/68000 systems can instead boot via the OS9Boot file descriptor and
+ * follow its segment list.
+ *
+ * In full generality, contiguity would mean that each segment starts exactly
+ * where the previous segment ends. ToolShed’s intended usage mirrors the OS-9
+ * docs: generate the bootfile on a freshly formatted disk/image. Given that
+ * OS9Boot is small (well under the per-segment maximum), a practical and
+ * sufficient check here is that OS9Boot uses only one segment.
+ */
 
+#define is_single_segment(fd) (int3((fd).fd_seg[1].lsn) == 0)
 
 static int do_os9gen(char **argv, char *device, char *bootfile,
 		     char *trackfile, struct personality *hwtype,
@@ -146,7 +159,6 @@ static int do_os9gen(char **argv, char *device, char *bootfile,
 	error_code ec = 0;
 	os9_path_id opath;
 	coco_path_id cpath;
-	int bootfile_LSN = 0, bootfile_Size = 0;
 	char buffer[256];
 	lsn0_sect LSN0;
 	u_int size;
@@ -162,11 +174,18 @@ static int do_os9gen(char **argv, char *device, char *bootfile,
 		int startlsn;
 		error_code ec;
 		char boottrack[256 * 18];
+		u_char *pd_sct, *pd_cyl, *pd_sid, *pd_typ;
+		int is_osk;
 
 
 		/* 1. Open the device raw and read LSB0 */
 
-		sprintf(buffer, "%s,@", device);
+		ec = snprintf(buffer, sizeof(buffer), "%s,@", device);
+		if (ec >= sizeof(buffer))
+		{
+			fprintf(stderr, "could not generate raw device pathname\n");
+			return (1);
+		}
 
 		ec = _os9_open(&opath, buffer, FAM_READ | FAM_WRITE);
 
@@ -185,9 +204,26 @@ static int do_os9gen(char **argv, char *device, char *bootfile,
 
 		clusterSize = int2(LSN0.dd_bit);
 
+		is_osk = (memcmp(LSN0.dd_sync, "Cruz", 4) == 0);
+
+		if (is_osk != 0)
+		{
+			pd_sct = LSN0.dd_opt.m68k.pd_sct;
+			pd_cyl = LSN0.dd_opt.m68k.pd_cyl;
+			pd_sid = LSN0.dd_opt.m68k.pd_sid;
+			pd_typ = LSN0.dd_opt.m68k.pd_typ;
+		}
+		else
+		{
+			pd_sct = LSN0.dd_opt.m6809.pd_sct;
+			pd_cyl = LSN0.dd_opt.m6809.pd_cyl;
+			pd_sid = LSN0.dd_opt.m6809.pd_sid;
+			pd_typ = LSN0.dd_opt.m6809.pd_typ;
+		}
+
 		/*  Diagnostic output */
 
-		/* printf("Sectors per track: %d, Heads: %d, Disk Type: %d, Total Sectors: %d \n", int2(LSN0.pd_sct), int1(LSN0.pd_sid), int1(LSN0.pd_typ), int3(LSN0.dd_tot)); */
+		/* printf("Sectors per track: %d, Heads: %d, Disk Type: %d, Total Sectors: %d \n", int2(pd_sct), int1(pd_sid), int1(pd_typ), int3(LSN0.dd_tot)); */
 
 		/* 2. Determine startlsn based on single or double-sided device */
 
@@ -199,12 +235,12 @@ static int do_os9gen(char **argv, char *device, char *bootfile,
 		{
 			printf("Dragon boottrack selected: ");
 			/* Check to make sure the disk image has minimum of 18 sectors per track */
-			if (int2(LSN0.pd_sct) < 18)
+			if (int2(pd_sct) < 18)
 			{
 				printf("\n");
 				fprintf(stderr,
 					"Error: minimum sectors per track of 18 required for DragonDOS, found %d\n",
-					int2(LSN0.pd_sct));
+					int2(pd_sct));
 				_os9_close(opath);
 				return (1);
 			}
@@ -222,36 +258,36 @@ static int do_os9gen(char **argv, char *device, char *bootfile,
 			{
 				/* Check to see if disk image is a HDD image if so set for default  */
 				/* startLSN of 612 for the boottrack for use with CoCoSDC and DriveWire HDD images */
-				if (int1(LSN0.pd_typ) == 0x80)
+				if (int1(pd_typ) == 0x80)
 				{
 					startlsn = 612;
 				}
 				else
 				{
 					/* Check to make sure the disk image has minimum of 18 sectors per track */
-					if (int2(LSN0.pd_sct) < 18)
+					if (int2(pd_sct) < 18)
 					{
 						printf("\n");
 						fprintf(stderr,
 							"Error: minimum sectors per track of 18 required for Disk Basic, found %d\n",
-							int2(LSN0.pd_sct));
+							int2(pd_sct));
 						_os9_close(opath);
 						return (1);
 					}
 					/* Check to make sure the disk image has minimum of 35 tracks */
-					if (int2(LSN0.pd_cyl) < 35)
+					if (int2(pd_cyl) < 35)
 					{
 						printf("\n");
 						fprintf(stderr,
 							"Error: minimum number of tracks required for Disk Basic is 35, found %d\n",
-							int2(LSN0.pd_cyl));
+							int2(pd_cyl));
 						_os9_close(opath);
 						return (1);
 					}
 					/* Use real floppy disk geometry to figure out real startLSN for boottrack */
 					startlsn =
-						34 * int2(LSN0.pd_sct) *
-						int1(LSN0.pd_sid);
+						34 * int2(pd_sct) *
+						int1(pd_sid);
 				}
 			}
 		}
@@ -311,10 +347,10 @@ static int do_os9gen(char **argv, char *device, char *bootfile,
 	if (bootfile != NULL)
 	{
 		fd_stats fdbuf;
-		char *bootfileMem;
-		size = sizeof(fdbuf);
+		int bootfile_LSN, bootfile_Size, bootfile_Data;
+		u_int size = sizeof(fdbuf);
 
-		/* 1. Open a path to the bootfile */
+		/* 2.1. Open a path to the bootfile */
 
 		ec = _coco_open(&cpath, bootfile, FAM_READ);
 
@@ -326,46 +362,72 @@ static int do_os9gen(char **argv, char *device, char *bootfile,
 			return (1);
 		}
 
-		/* 2.2. Allocate buffer memory and read bootfile */
-		bootfileMem = (char *) malloc(65536);	/* Allocate maximum */
-		if (bootfileMem == NULL)
+		/* 2.2. Create a file called 'OS9Boot' in the root dir of device */
+		ec = snprintf(buffer, sizeof(buffer), "%s,OS9Boot", device);
+		if (ec >= sizeof(buffer))
+		{
+			_coco_close(cpath);
+			fprintf(stderr, "could not generate absolute boot file name\n");
+			return (-1);
+		}
+
+		ec = _os9_create(&opath, buffer, FAM_WRITE, FAM_READ | FAM_WRITE);
+		if (ec != 0)
 		{
 			_coco_close(cpath);
 			fprintf(stderr, "Failed to allocate memory\n");
 			return (-1);
 		}
 
-		size = 65536;
-		_coco_read(cpath, bootfileMem, &size);
-
-		_coco_close(cpath);	/* We're done with the path now */
-
-		/* 2.3. Create a file called 'OS9Boot' in the root dir of device */
-		sprintf(buffer, "%s,OS9Boot", device);
-
-		ec = _os9_create(&opath, buffer, FAM_WRITE,
-				 FAM_READ | FAM_WRITE);
-		if (ec != 0)
-		{
-			return (ec);
-		}
-
-		/* 2.4. Write out bootfile to path */
-		_os9_write(opath, bootfileMem, &size);
-		free(bootfileMem);
+		/* 2.3. Write out bootfile to path */
 
 		_os9_gs_fd(opath, sizeof(fdbuf), &fdbuf);
 
-		bootfile_LSN = int3(fdbuf.fd_seg[0].lsn);
-		bootfile_Size = int4(fdbuf.fd_siz);
+		{
+			char ioBuf[8192];
 
-		if (int3(fdbuf.fd_seg[1].lsn) != 0 && extended == 0)
+			for (;;)
+			{
+				u_int n = sizeof(ioBuf);
+
+				ec = _coco_read(cpath, ioBuf, &n);
+				if (ec == EOS_EOF)
+				{
+					break;
+				}
+				if (ec != 0) {
+					fprintf(stderr, "%s: error %d reading '%s'\n", argv[0], ec, bootfile);
+					_coco_close(cpath);
+					_os9_close(opath);
+					return (1);
+				}
+
+				ec = _os9_write(opath, ioBuf, &n);
+				if (ec != 0) 
+				{
+					fprintf(stderr, "%s: error %d writing OS9Boot\n", argv[0], ec);
+					_coco_close(cpath);
+					_os9_close(opath);
+					return (1);
+				}
+			}
+		}
+
+		_os9_gs_fd(opath, sizeof(fdbuf), &fdbuf);
+
+		if (!is_single_segment(fdbuf) && extended == 0)
 		{
 			printf("Error: %s is fragmented\n", bootfile);
+			_coco_close(cpath);
 			_os9_close(opath);
 			return (1);
 		}
 
+		bootfile_Size = int4(fdbuf.fd_siz);
+		bootfile_LSN = opath->pl_fd_lsn;
+		bootfile_Data = int3(fdbuf.fd_seg[0].lsn);
+
+		_coco_close(cpath);
 		_os9_close(opath);
 
 		/* Link the passed bootfile to LSN0 */
@@ -389,14 +451,13 @@ static int do_os9gen(char **argv, char *device, char *bootfile,
 			return (1);
 		}
 
-		if (extended == 0)
+		if (extended == 0 || (bootfile_Size < 65536 && is_single_segment(fdbuf)))
 		{
-			_int3(bootfile_LSN, LSN0.dd_bt);
+			_int3(bootfile_Data, LSN0.dd_bt);
 			_int2(bootfile_Size, LSN0.dd_bsz);
 		}
 		else
 		{
-			bootfile_LSN--;
 			_int3(bootfile_LSN, LSN0.dd_bt);
 			_int2(0, LSN0.dd_bsz);
 		}
